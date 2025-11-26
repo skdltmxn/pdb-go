@@ -9,10 +9,11 @@ import (
 )
 
 var (
-	symbolsAll      bool
-	symbolsKind     string
+	symbolsAll       bool
+	symbolsKind      string
 	symbolsDemangled bool
-	symbolsLimit    int
+	symbolsLimit     int
+	symbolsShowRVA   bool
 )
 
 var symbolsCmd = &cobra.Command{
@@ -31,6 +32,7 @@ func init() {
 	symbolsCmd.Flags().StringVarP(&symbolsKind, "kind", "k", "", "filter by symbol kind (public, function, data, udt, constant)")
 	symbolsCmd.Flags().BoolVarP(&symbolsDemangled, "demangle", "d", false, "show demangled names")
 	symbolsCmd.Flags().IntVarP(&symbolsLimit, "limit", "n", 0, "limit number of symbols shown (0 = unlimited)")
+	symbolsCmd.Flags().BoolVarP(&symbolsShowRVA, "rva", "r", false, "show RVA (Relative Virtual Address)")
 }
 
 func runSymbols(cmd *cobra.Command, args []string) error {
@@ -45,6 +47,15 @@ func runSymbols(cmd *cobra.Command, args []string) error {
 	symbols, err := f.Symbols()
 	if err != nil {
 		return fmt.Errorf("failed to get symbols: %w", err)
+	}
+
+	// Load section headers for RVA calculation
+	var sections *pdb.SectionHeaders
+	if symbolsShowRVA {
+		sections, err = f.Sections()
+		if err != nil {
+			fmt.Fprintf(output, "Warning: could not load section headers for RVA: %v\n", err)
+		}
 	}
 
 	// Determine which kind filter to apply
@@ -73,8 +84,12 @@ func runSymbols(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print header
-	fmt.Fprintf(output, "%-10s %-8s %-10s %s\n", "KIND", "SECTION", "OFFSET", "NAME")
-	fmt.Fprintf(output, "%s\n", strings.Repeat("-", 80))
+	if symbolsShowRVA {
+		fmt.Fprintf(output, "%-10s %-8s %-10s %-10s %s\n", "KIND", "SECTION", "OFFSET", "RVA", "NAME")
+	} else {
+		fmt.Fprintf(output, "%-10s %-8s %-10s %s\n", "KIND", "SECTION", "OFFSET", "NAME")
+	}
+	fmt.Fprintf(output, "%s\n", strings.Repeat("-", 90))
 
 	count := 0
 
@@ -84,7 +99,7 @@ func runSymbols(cmd *cobra.Command, args []string) error {
 			if hasKindFilter && sym.Kind() != kindFilter {
 				continue
 			}
-			printSymbol(sym)
+			printSymbol(sym, sections)
 			count++
 			if symbolsLimit > 0 && count >= symbolsLimit {
 				break
@@ -96,7 +111,7 @@ func runSymbols(cmd *cobra.Command, args []string) error {
 			if hasKindFilter && sym.Kind() != kindFilter {
 				continue
 			}
-			printSymbol(sym)
+			printSymbol(sym, sections)
 			count++
 			if symbolsLimit > 0 && count >= symbolsLimit {
 				break
@@ -108,7 +123,7 @@ func runSymbols(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func printSymbol(sym pdb.Symbol) {
+func printSymbol(sym pdb.Symbol, sections *pdb.SectionHeaders) {
 	name := sym.Name()
 	if symbolsDemangled {
 		name = sym.DemangledName()
@@ -118,16 +133,42 @@ func printSymbol(sym pdb.Symbol) {
 	offset := sym.Offset()
 
 	if section == 0 && offset == 0 {
-		fmt.Fprintf(output, "%-10s %-8s %-10s %s\n",
-			sym.Kind().String(),
-			"-",
-			"-",
-			name)
+		if symbolsShowRVA {
+			fmt.Fprintf(output, "%-10s %-8s %-10s %-10s %s\n",
+				sym.Kind().String(),
+				"-",
+				"-",
+				"-",
+				name)
+		} else {
+			fmt.Fprintf(output, "%-10s %-8s %-10s %s\n",
+				sym.Kind().String(),
+				"-",
+				"-",
+				name)
+		}
 	} else {
-		fmt.Fprintf(output, "%-10s %04X     0x%08X %s\n",
-			sym.Kind().String(),
-			section,
-			offset,
-			name)
+		if symbolsShowRVA && sections != nil {
+			rva := sections.ToRVA(section, offset)
+			fmt.Fprintf(output, "%-10s %04X     0x%08X 0x%08X %s\n",
+				sym.Kind().String(),
+				section,
+				offset,
+				rva,
+				name)
+		} else if symbolsShowRVA {
+			fmt.Fprintf(output, "%-10s %04X     0x%08X %-10s %s\n",
+				sym.Kind().String(),
+				section,
+				offset,
+				"N/A",
+				name)
+		} else {
+			fmt.Fprintf(output, "%-10s %04X     0x%08X %s\n",
+				sym.Kind().String(),
+				section,
+				offset,
+				name)
+		}
 	}
 }

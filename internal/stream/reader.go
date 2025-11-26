@@ -265,6 +265,14 @@ func (r *Reader) Peek(n int) ([]byte, error) {
 	return v, nil
 }
 
+// PeekU8 returns the next byte without advancing the position.
+func (r *Reader) PeekU8() (uint8, error) {
+	if r.offset >= len(r.data) {
+		return 0, ErrUnexpectedEOF
+	}
+	return r.data[r.offset], nil
+}
+
 // PeekU16 returns the next 16-bit integer without advancing the position.
 func (r *Reader) PeekU16() (uint16, error) {
 	if r.offset+2 > len(r.data) {

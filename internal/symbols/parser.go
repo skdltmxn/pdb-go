@@ -921,9 +921,3 @@ func ParseSymbolRecordStream(data []byte) ([]*PublicSym32, error) {
 	return symbols, nil
 }
 
-// ParsePublicSymbolStream is a convenience function that parses public symbols.
-// It expects the symbol record stream data (from SymRecordStreamIndex).
-// Deprecated: Use ParseSymbolRecordStream instead.
-func ParsePublicSymbolStream(data []byte) ([]*PublicSym32, error) {
-	return ParseSymbolRecordStream(data)
-}

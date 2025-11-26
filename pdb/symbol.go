@@ -71,23 +71,28 @@ type Symbol interface {
 	Offset() uint32
 }
 
-// PublicSymbol represents a public symbol export.
-type PublicSymbol struct {
+// baseSymbol provides common symbol functionality including lazy demangling.
+type baseSymbol struct {
 	name          string
 	demangledName string
 	demangledOnce sync.Once
-	section       uint16
-	offset        uint32
-	flags         symbols.PublicSymFlags
 }
 
-func (s *PublicSymbol) Name() string { return s.name }
+func (s *baseSymbol) Name() string { return s.name }
 
-func (s *PublicSymbol) DemangledName() string {
+func (s *baseSymbol) DemangledName() string {
 	s.demangledOnce.Do(func() {
 		s.demangledName = demangle.DemangleSimple(s.name)
 	})
 	return s.demangledName
+}
+
+// PublicSymbol represents a public symbol export.
+type PublicSymbol struct {
+	baseSymbol
+	section uint16
+	offset  uint32
+	flags   symbols.PublicSymFlags
 }
 
 func (s *PublicSymbol) Kind() SymbolKind { return SymbolKindPublic }
@@ -98,69 +103,36 @@ func (s *PublicSymbol) IsFunction() bool { return s.flags.IsFunction() }
 
 // FunctionSymbol represents a function with full debug info.
 type FunctionSymbol struct {
-	name          string
-	demangledName string
-	demangledOnce sync.Once
-	section       uint16
-	offset        uint32
-	length        uint32
-	typeIndex     uint32
+	baseSymbol
+	section   uint16
+	offset    uint32
+	length    uint32
+	typeIndex uint32
 }
 
-func (s *FunctionSymbol) Name() string { return s.name }
-
-func (s *FunctionSymbol) DemangledName() string {
-	s.demangledOnce.Do(func() {
-		s.demangledName = demangle.DemangleSimple(s.name)
-	})
-	return s.demangledName
-}
-
-func (s *FunctionSymbol) Kind() SymbolKind { return SymbolKindFunction }
-func (s *FunctionSymbol) Section() uint16  { return s.section }
-func (s *FunctionSymbol) Offset() uint32   { return s.offset }
-func (s *FunctionSymbol) Length() uint32   { return s.length }
+func (s *FunctionSymbol) Kind() SymbolKind  { return SymbolKindFunction }
+func (s *FunctionSymbol) Section() uint16   { return s.section }
+func (s *FunctionSymbol) Offset() uint32    { return s.offset }
+func (s *FunctionSymbol) Length() uint32    { return s.length }
 func (s *FunctionSymbol) TypeIndex() uint32 { return s.typeIndex }
 
 // DataSymbol represents a global or static data symbol.
 type DataSymbol struct {
-	name          string
-	demangledName string
-	demangledOnce sync.Once
-	section       uint16
-	offset        uint32
-	typeIndex     uint32
+	baseSymbol
+	section   uint16
+	offset    uint32
+	typeIndex uint32
 }
 
-func (s *DataSymbol) Name() string { return s.name }
-
-func (s *DataSymbol) DemangledName() string {
-	s.demangledOnce.Do(func() {
-		s.demangledName = demangle.DemangleSimple(s.name)
-	})
-	return s.demangledName
-}
-
-func (s *DataSymbol) Kind() SymbolKind   { return SymbolKindData }
-func (s *DataSymbol) Section() uint16    { return s.section }
-func (s *DataSymbol) Offset() uint32     { return s.offset }
-func (s *DataSymbol) TypeIndex() uint32  { return s.typeIndex }
+func (s *DataSymbol) Kind() SymbolKind  { return SymbolKindData }
+func (s *DataSymbol) Section() uint16   { return s.section }
+func (s *DataSymbol) Offset() uint32    { return s.offset }
+func (s *DataSymbol) TypeIndex() uint32 { return s.typeIndex }
 
 // UDTSymbol represents a user-defined type reference.
 type UDTSymbol struct {
-	name          string
-	demangledName string
-	demangledOnce sync.Once
-	typeIndex     uint32
-}
-
-func (s *UDTSymbol) Name() string { return s.name }
-
-func (s *UDTSymbol) DemangledName() string {
-	s.demangledOnce.Do(func() {
-		s.demangledName = demangle.DemangleSimple(s.name)
-	})
-	return s.demangledName
+	baseSymbol
+	typeIndex uint32
 }
 
 func (s *UDTSymbol) Kind() SymbolKind  { return SymbolKindUDT }
@@ -170,20 +142,9 @@ func (s *UDTSymbol) TypeIndex() uint32 { return s.typeIndex }
 
 // ConstantSymbol represents a constant.
 type ConstantSymbol struct {
-	name          string
-	demangledName string
-	demangledOnce sync.Once
-	value         uint64
-	typeIndex     uint32
-}
-
-func (s *ConstantSymbol) Name() string { return s.name }
-
-func (s *ConstantSymbol) DemangledName() string {
-	s.demangledOnce.Do(func() {
-		s.demangledName = demangle.DemangleSimple(s.name)
-	})
-	return s.demangledName
+	baseSymbol
+	value     uint64
+	typeIndex uint32
 }
 
 func (s *ConstantSymbol) Kind() SymbolKind  { return SymbolKindConstant }
@@ -305,10 +266,10 @@ func (st *SymbolTable) Public() iter.Seq[*PublicSymbol] {
 				sym, err := symbols.ParsePublicSym32(rec.Data)
 				if err == nil {
 					pubSym := &PublicSymbol{
-						name:    sym.Name,
-						section: sym.Segment,
-						offset:  sym.Offset,
-						flags:   sym.Flags,
+						baseSymbol: baseSymbol{name: sym.Name},
+						section:    sym.Segment,
+						offset:     sym.Offset,
+						flags:      sym.Flags,
 					}
 					if !yield(pubSym) {
 						return
@@ -366,10 +327,10 @@ func (st *SymbolTable) loadPublicSymbols() ([]*PublicSymbol, error) {
 			sym, err := symbols.ParsePublicSym32(rec.Data)
 			if err == nil {
 				result = append(result, &PublicSymbol{
-					name:    sym.Name,
-					section: sym.Segment,
-					offset:  sym.Offset,
-					flags:   sym.Flags,
+					baseSymbol: baseSymbol{name: sym.Name},
+					section:    sym.Segment,
+					offset:     sym.Offset,
+					flags:      sym.Flags,
 				})
 			}
 		}
@@ -500,10 +461,10 @@ func (st *SymbolTable) convertSymbolRecord(rec *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &PublicSymbol{
-			name:    sym.Name,
-			section: sym.Segment,
-			offset:  sym.Offset,
-			flags:   sym.Flags,
+			baseSymbol: baseSymbol{name: sym.Name},
+			section:    sym.Segment,
+			offset:     sym.Offset,
+			flags:      sym.Flags,
 		}
 
 	case symbols.S_GPROC32, symbols.S_LPROC32, symbols.S_GPROC32_ID, symbols.S_LPROC32_ID:
@@ -512,11 +473,11 @@ func (st *SymbolTable) convertSymbolRecord(rec *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &FunctionSymbol{
-			name:      sym.Name,
-			section:   sym.Segment,
-			offset:    sym.CodeOffset,
-			length:    sym.CodeSize,
-			typeIndex: uint32(sym.FunctionType),
+			baseSymbol: baseSymbol{name: sym.Name},
+			section:    sym.Segment,
+			offset:     sym.CodeOffset,
+			length:     sym.CodeSize,
+			typeIndex:  uint32(sym.FunctionType),
 		}
 
 	case symbols.S_GDATA32, symbols.S_LDATA32:
@@ -525,10 +486,10 @@ func (st *SymbolTable) convertSymbolRecord(rec *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &DataSymbol{
-			name:      sym.Name,
-			section:   sym.Segment,
-			offset:    sym.Offset,
-			typeIndex: uint32(sym.Type),
+			baseSymbol: baseSymbol{name: sym.Name},
+			section:    sym.Segment,
+			offset:     sym.Offset,
+			typeIndex:  uint32(sym.Type),
 		}
 
 	case symbols.S_UDT:
@@ -537,8 +498,8 @@ func (st *SymbolTable) convertSymbolRecord(rec *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &UDTSymbol{
-			name:      sym.Name,
-			typeIndex: uint32(sym.Type),
+			baseSymbol: baseSymbol{name: sym.Name},
+			typeIndex:  uint32(sym.Type),
 		}
 
 	case symbols.S_CONSTANT:
@@ -547,9 +508,9 @@ func (st *SymbolTable) convertSymbolRecord(rec *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &ConstantSymbol{
-			name:      sym.Name,
-			value:     sym.Value,
-			typeIndex: uint32(sym.Type),
+			baseSymbol: baseSymbol{name: sym.Name},
+			value:      sym.Value,
+			typeIndex:  uint32(sym.Type),
 		}
 
 	default:

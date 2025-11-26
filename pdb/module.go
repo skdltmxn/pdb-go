@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/skdltmxn/pdb-go/internal/dbi"
-	"github.com/skdltmxn/pdb-go/internal/demangle"
 	"github.com/skdltmxn/pdb-go/internal/symbols"
 )
 
@@ -130,11 +129,11 @@ func (m *Module) convertSymbol(record *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &FunctionSymbol{
-			name:      proc.Name,
-			section:   proc.Segment,
-			offset:    proc.CodeOffset,
-			length:    proc.CodeSize,
-			typeIndex: uint32(proc.FunctionType),
+			baseSymbol: baseSymbol{name: proc.Name},
+			section:    proc.Segment,
+			offset:     proc.CodeOffset,
+			length:     proc.CodeSize,
+			typeIndex:  uint32(proc.FunctionType),
 		}
 
 	case symbols.S_GDATA32, symbols.S_LDATA32:
@@ -143,10 +142,10 @@ func (m *Module) convertSymbol(record *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &DataSymbol{
-			name:      data.Name,
-			section:   data.Segment,
-			offset:    data.Offset,
-			typeIndex: uint32(data.Type),
+			baseSymbol: baseSymbol{name: data.Name},
+			section:    data.Segment,
+			offset:     data.Offset,
+			typeIndex:  uint32(data.Type),
 		}
 
 	case symbols.S_UDT, symbols.S_UDT_ST:
@@ -155,8 +154,8 @@ func (m *Module) convertSymbol(record *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &UDTSymbol{
-			name:      udt.Name,
-			typeIndex: uint32(udt.Type),
+			baseSymbol: baseSymbol{name: udt.Name},
+			typeIndex:  uint32(udt.Type),
 		}
 
 	case symbols.S_CONSTANT, symbols.S_CONSTANT_ST:
@@ -165,9 +164,9 @@ func (m *Module) convertSymbol(record *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &ConstantSymbol{
-			name:      c.Name,
-			value:     c.Value,
-			typeIndex: uint32(c.Type),
+			baseSymbol: baseSymbol{name: c.Name},
+			value:      c.Value,
+			typeIndex:  uint32(c.Type),
 		}
 
 	case symbols.S_LOCAL:
@@ -176,7 +175,7 @@ func (m *Module) convertSymbol(record *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &LocalSymbol{
-			name:        local.Name,
+			baseSymbol:  baseSymbol{name: local.Name},
 			typeIndex:   uint32(local.Type),
 			isParameter: local.Flags.IsParameter(),
 		}
@@ -187,9 +186,9 @@ func (m *Module) convertSymbol(record *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &LabelSymbol{
-			name:    label.Name,
-			section: label.Segment,
-			offset:  label.Offset,
+			baseSymbol: baseSymbol{name: label.Name},
+			section:    label.Segment,
+			offset:     label.Offset,
 		}
 
 	case symbols.S_BLOCK32:
@@ -198,10 +197,10 @@ func (m *Module) convertSymbol(record *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &BlockSymbol{
-			name:    block.Name,
-			section: block.Segment,
-			offset:  block.Offset,
-			length:  block.CodeSize,
+			baseSymbol: baseSymbol{name: block.Name},
+			section:    block.Segment,
+			offset:     block.Offset,
+			length:     block.CodeSize,
 		}
 
 	case symbols.S_THUNK32:
@@ -210,10 +209,10 @@ func (m *Module) convertSymbol(record *symbols.SymbolRecord) Symbol {
 			return nil
 		}
 		return &ThunkSymbol{
-			name:    thunk.Name,
-			section: thunk.Segment,
-			offset:  thunk.Offset,
-			length:  uint32(thunk.Length),
+			baseSymbol: baseSymbol{name: thunk.Name},
+			section:    thunk.Segment,
+			offset:     thunk.Offset,
+			length:     uint32(thunk.Length),
 		}
 
 	default:
@@ -232,20 +231,9 @@ func (m *Module) SymbolCount() int {
 
 // LocalSymbol represents a local variable.
 type LocalSymbol struct {
-	name          string
-	demangledName string
-	demangledOnce sync.Once
-	typeIndex     uint32
-	isParameter   bool
-}
-
-func (s *LocalSymbol) Name() string { return s.name }
-
-func (s *LocalSymbol) DemangledName() string {
-	s.demangledOnce.Do(func() {
-		s.demangledName = demangle.DemangleSimple(s.name)
-	})
-	return s.demangledName
+	baseSymbol
+	typeIndex   uint32
+	isParameter bool
 }
 
 func (s *LocalSymbol) Kind() SymbolKind {
@@ -255,27 +243,16 @@ func (s *LocalSymbol) Kind() SymbolKind {
 	return SymbolKindLocal
 }
 
-func (s *LocalSymbol) Section() uint16  { return 0 }
-func (s *LocalSymbol) Offset() uint32   { return 0 }
+func (s *LocalSymbol) Section() uint16   { return 0 }
+func (s *LocalSymbol) Offset() uint32    { return 0 }
 func (s *LocalSymbol) TypeIndex() uint32 { return s.typeIndex }
 func (s *LocalSymbol) IsParameter() bool { return s.isParameter }
 
 // LabelSymbol represents a code label.
 type LabelSymbol struct {
-	name          string
-	demangledName string
-	demangledOnce sync.Once
-	section       uint16
-	offset        uint32
-}
-
-func (s *LabelSymbol) Name() string { return s.name }
-
-func (s *LabelSymbol) DemangledName() string {
-	s.demangledOnce.Do(func() {
-		s.demangledName = demangle.DemangleSimple(s.name)
-	})
-	return s.demangledName
+	baseSymbol
+	section uint16
+	offset  uint32
 }
 
 func (s *LabelSymbol) Kind() SymbolKind { return SymbolKindLabel }
@@ -284,21 +261,10 @@ func (s *LabelSymbol) Offset() uint32   { return s.offset }
 
 // BlockSymbol represents a code block.
 type BlockSymbol struct {
-	name          string
-	demangledName string
-	demangledOnce sync.Once
-	section       uint16
-	offset        uint32
-	length        uint32
-}
-
-func (s *BlockSymbol) Name() string { return s.name }
-
-func (s *BlockSymbol) DemangledName() string {
-	s.demangledOnce.Do(func() {
-		s.demangledName = demangle.DemangleSimple(s.name)
-	})
-	return s.demangledName
+	baseSymbol
+	section uint16
+	offset  uint32
+	length  uint32
 }
 
 func (s *BlockSymbol) Kind() SymbolKind { return SymbolKindBlock }
@@ -308,21 +274,10 @@ func (s *BlockSymbol) Length() uint32   { return s.length }
 
 // ThunkSymbol represents a thunk.
 type ThunkSymbol struct {
-	name          string
-	demangledName string
-	demangledOnce sync.Once
-	section       uint16
-	offset        uint32
-	length        uint32
-}
-
-func (s *ThunkSymbol) Name() string { return s.name }
-
-func (s *ThunkSymbol) DemangledName() string {
-	s.demangledOnce.Do(func() {
-		s.demangledName = demangle.DemangleSimple(s.name)
-	})
-	return s.demangledName
+	baseSymbol
+	section uint16
+	offset  uint32
+	length  uint32
 }
 
 func (s *ThunkSymbol) Kind() SymbolKind { return SymbolKindThunk }

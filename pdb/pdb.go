@@ -42,6 +42,10 @@ type File struct {
 	typeTable     *TypeTable
 	typeTableOnce sync.Once
 	typeTableErr  error
+
+	sectionHeaders     *SectionHeaders
+	sectionHeadersOnce sync.Once
+	sectionHeadersErr  error
 }
 
 // PDBInfo contains metadata about the PDB file.

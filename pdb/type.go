@@ -2,6 +2,7 @@ package pdb
 
 import (
 	"iter"
+	"strings"
 	"sync"
 
 	"github.com/skdltmxn/pdb-go/internal/tpi"
@@ -307,11 +308,23 @@ type TypeTable struct {
 	// Lazy-loaded types
 	typeCache sync.Map // map[TypeIndex]Type
 
-	// Index by name for named types
+	// Index by name for named types (protected by byNameOnce)
 	byName     map[string][]Type
 	byNameOnce sync.Once
 
-	mu sync.RWMutex
+	// Index for member lookup (lazy-built, protected by memberIndexOnce)
+	memberIndex     *memberNameIndex
+	memberIndexOnce sync.Once
+}
+
+// memberNameIndex provides fast member name lookup.
+type memberNameIndex struct {
+	// byName maps member name -> list of members
+	byName map[string][]*Member
+	// byQualifiedName maps "OwnerName::MemberName" -> list of members
+	byQualifiedName map[string][]*Member
+	// inheritance maps class name -> list of base class names (for inherited member lookup)
+	inheritance map[string][]string
 }
 
 func newTypeTable(tpiStream *tpi.Stream) *TypeTable {
@@ -377,11 +390,7 @@ func (tt *TypeTable) ByName(name string) iter.Seq[Type] {
 	return func(yield func(Type) bool) {
 		tt.buildNameIndex()
 
-		tt.mu.RLock()
-		types := tt.byName[name]
-		tt.mu.RUnlock()
-
-		for _, typ := range types {
+		for _, typ := range tt.byName[name] {
 			if !yield(typ) {
 				return
 			}
@@ -391,9 +400,6 @@ func (tt *TypeTable) ByName(name string) iter.Seq[Type] {
 
 func (tt *TypeTable) buildNameIndex() {
 	tt.byNameOnce.Do(func() {
-		tt.mu.Lock()
-		defer tt.mu.Unlock()
-
 		tt.byName = make(map[string][]Type)
 
 		for typ := range tt.All() {
@@ -712,3 +718,290 @@ func (t *genericType) Index() TypeIndex { return t.index }
 func (t *genericType) Kind() TypeKind   { return t.kind }
 func (t *genericType) Name() string     { return "" }
 func (t *genericType) Size() uint64     { return 0 }
+
+// Member represents a class/struct member (field).
+type Member struct {
+	Name       string
+	Type       TypeIndex
+	Offset     uint64      // Byte offset within the class/struct (0 for static)
+	Access     string      // "public", "protected", "private", or ""
+	OwnerType  TypeIndex   // The class/struct that contains this member
+	OwnerName  string      // Name of the owner class/struct
+	IsStatic   bool        // True if this is a static member
+}
+
+// MemberSearchResult represents a member found in search.
+type MemberSearchResult struct {
+	Member
+	// Additional context
+}
+
+// FindMembers searches for class/struct members by name across all types.
+// Supports both simple name ("fieldName") and qualified name ("ClassName::fieldName").
+// For qualified names like "Child::member", it also searches inherited members from base classes.
+// Uses cached index for O(1) lookup after first call.
+func (tt *TypeTable) FindMembers(name string) iter.Seq[*MemberSearchResult] {
+	return func(yield func(*MemberSearchResult) bool) {
+		tt.buildMemberIndex()
+
+		if tt.memberIndex == nil {
+			return
+		}
+
+		// Check if it's a qualified name (contains ::)
+		if idx := strings.Index(name, "::"); idx > 0 {
+			className := name[:idx]
+			memberName := name[idx+2:]
+
+			// Track already yielded members to avoid duplicates
+			seen := make(map[string]bool)
+
+			// Search the class and all its base classes
+			classesToSearch := tt.getInheritanceChain(className)
+
+			for _, class := range classesToSearch {
+				qualifiedName := class + "::" + memberName
+				for _, m := range tt.memberIndex.byQualifiedName[qualifiedName] {
+					// Create unique key for deduplication
+					key := m.OwnerName + "::" + m.Name
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+
+					result := &MemberSearchResult{Member: *m}
+					if !yield(result) {
+						return
+					}
+				}
+			}
+		} else {
+			// Simple name search - no inheritance traversal needed
+			for _, m := range tt.memberIndex.byName[name] {
+				result := &MemberSearchResult{Member: *m}
+				if !yield(result) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// getInheritanceChain returns the class and all its ancestor classes (including the class itself).
+// Uses BFS to traverse the inheritance hierarchy.
+func (tt *TypeTable) getInheritanceChain(className string) []string {
+	result := []string{className}
+	visited := map[string]bool{className: true}
+	queue := []string{className}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		// Get base classes of current class
+		baseClasses := tt.memberIndex.inheritance[current]
+		for _, base := range baseClasses {
+			if !visited[base] {
+				visited[base] = true
+				result = append(result, base)
+				queue = append(queue, base)
+			}
+		}
+	}
+
+	return result
+}
+
+func (tt *TypeTable) buildMemberIndex() {
+	tt.memberIndexOnce.Do(func() {
+		typeCount := int(tt.tpiStream.TypeCount())
+
+		idx := &memberNameIndex{
+			byName:          make(map[string][]*Member, typeCount/4),
+			byQualifiedName: make(map[string][]*Member, typeCount/4),
+			inheritance:     make(map[string][]string, typeCount/8),
+		}
+
+		// Single pass: collect type names and parse class definitions
+		// Store parsed class info for deferred inheritance resolution
+		type classInfo struct {
+			name           string
+			fieldListIndex tpi.TypeIndex
+			typeIndex      tpi.TypeIndex
+		}
+
+		typeNames := make(map[tpi.TypeIndex]string, typeCount/2)
+		classes := make([]classInfo, 0, typeCount/4)
+
+		begin := tt.tpiStream.TypeIndexBegin()
+		end := tt.tpiStream.TypeIndexEnd()
+
+		for ti := begin; ti < end; ti++ {
+			record, err := tt.tpiStream.GetTypeRecord(ti)
+			if err != nil || record == nil {
+				continue
+			}
+
+			switch record.Kind {
+			case tpi.LF_CLASS, tpi.LF_CLASS_ST, tpi.LF_STRUCTURE, tpi.LF_STRUCTURE_ST:
+				rec, err := tpi.ParseClassRecord(record.Data)
+				if err != nil {
+					continue
+				}
+				typeNames[ti] = rec.Name
+				if !rec.Properties.IsForwardRef() && rec.FieldList != 0 {
+					classes = append(classes, classInfo{
+						name:           rec.Name,
+						fieldListIndex: rec.FieldList,
+						typeIndex:      ti,
+					})
+				}
+			case tpi.LF_UNION, tpi.LF_UNION_ST:
+				rec, err := tpi.ParseUnionRecord(record.Data)
+				if err != nil {
+					continue
+				}
+				typeNames[ti] = rec.Name
+				if !rec.Properties.IsForwardRef() && rec.FieldList != 0 {
+					classes = append(classes, classInfo{
+						name:           rec.Name,
+						fieldListIndex: rec.FieldList,
+						typeIndex:      ti,
+					})
+				}
+			}
+		}
+
+		// Process collected classes: build member index and inheritance map
+		for _, cls := range classes {
+			fieldRecord, err := tt.tpiStream.GetTypeRecord(cls.fieldListIndex)
+			if err != nil || fieldRecord == nil || fieldRecord.Kind != tpi.LF_FIELDLIST {
+				continue
+			}
+
+			fieldList, err := tpi.ParseFieldListRecord(fieldRecord.Data)
+			if err != nil {
+				continue
+			}
+
+			for _, member := range fieldList.Members {
+				var m *Member
+
+				switch mem := member.(type) {
+				case *tpi.MemberRecord:
+					m = &Member{
+						Name:      mem.Name,
+						Type:      TypeIndex(mem.Type),
+						Offset:    mem.Offset,
+						Access:    tpi.MemberAccess(mem.Access).String(),
+						OwnerType: TypeIndex(cls.typeIndex),
+						OwnerName: cls.name,
+					}
+				case *tpi.StaticMemberRecord:
+					m = &Member{
+						Name:      mem.Name,
+						Type:      TypeIndex(mem.Type),
+						Offset:    0,
+						Access:    tpi.MemberAccess(mem.Access).String(),
+						OwnerType: TypeIndex(cls.typeIndex),
+						OwnerName: cls.name,
+						IsStatic:  true,
+					}
+				case *tpi.BaseClassRecord:
+					if baseName := typeNames[mem.Type]; baseName != "" {
+						idx.inheritance[cls.name] = append(idx.inheritance[cls.name], baseName)
+					}
+				case *tpi.VirtualBaseClassRecord:
+					if baseName := typeNames[mem.BaseType]; baseName != "" {
+						idx.inheritance[cls.name] = append(idx.inheritance[cls.name], baseName)
+					}
+				}
+
+				if m != nil {
+					idx.byName[m.Name] = append(idx.byName[m.Name], m)
+					qualifiedName := cls.name + "::" + m.Name
+					idx.byQualifiedName[qualifiedName] = append(idx.byQualifiedName[qualifiedName], m)
+				}
+			}
+		}
+
+		tt.memberIndex = idx
+	})
+}
+
+// GetMembers returns all members of a class/struct/union type.
+func (tt *TypeTable) GetMembers(typeIndex TypeIndex) ([]*Member, error) {
+	record, err := tt.tpiStream.GetTypeRecord(tpi.TypeIndex(typeIndex))
+	if err != nil || record == nil {
+		return nil, ErrTypeNotFound
+	}
+
+	var ownerName string
+	var fieldListIndex tpi.TypeIndex
+
+	switch record.Kind {
+	case tpi.LF_CLASS, tpi.LF_CLASS_ST:
+		rec, err := tpi.ParseClassRecord(record.Data)
+		if err != nil {
+			return nil, err
+		}
+		ownerName = rec.Name
+		fieldListIndex = rec.FieldList
+	case tpi.LF_STRUCTURE, tpi.LF_STRUCTURE_ST:
+		rec, err := tpi.ParseClassRecord(record.Data)
+		if err != nil {
+			return nil, err
+		}
+		ownerName = rec.Name
+		fieldListIndex = rec.FieldList
+	case tpi.LF_UNION, tpi.LF_UNION_ST:
+		rec, err := tpi.ParseUnionRecord(record.Data)
+		if err != nil {
+			return nil, err
+		}
+		ownerName = rec.Name
+		fieldListIndex = rec.FieldList
+	default:
+		return nil, ErrTypeNotFound
+	}
+
+	if fieldListIndex == 0 {
+		return nil, nil
+	}
+
+	fieldRecord, err := tt.tpiStream.GetTypeRecord(fieldListIndex)
+	if err != nil || fieldRecord == nil || fieldRecord.Kind != tpi.LF_FIELDLIST {
+		return nil, nil
+	}
+
+	fieldList, err := tpi.ParseFieldListRecord(fieldRecord.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	var members []*Member
+	for _, m := range fieldList.Members {
+		switch mem := m.(type) {
+		case *tpi.MemberRecord:
+			members = append(members, &Member{
+				Name:      mem.Name,
+				Type:      TypeIndex(mem.Type),
+				Offset:    mem.Offset,
+				Access:    tpi.MemberAccess(mem.Access).String(),
+				OwnerType: typeIndex,
+				OwnerName: ownerName,
+			})
+		case *tpi.StaticMemberRecord:
+			members = append(members, &Member{
+				Name:      mem.Name,
+				Type:      TypeIndex(mem.Type),
+				Offset:    0,
+				Access:    tpi.MemberAccess(mem.Access).String(),
+				OwnerType: typeIndex,
+				OwnerName: ownerName,
+			})
+		}
+	}
+
+	return members, nil
+}

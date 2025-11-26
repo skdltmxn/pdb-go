@@ -791,3 +791,397 @@ func ParseBitFieldRecord(data []byte) (*BitFieldRecord, error) {
 		Position: position,
 	}, nil
 }
+
+// FieldListRecord represents an LF_FIELDLIST type containing class/struct members.
+type FieldListRecord struct {
+	Members []FieldListMember
+}
+
+// FieldListMember is a member within a field list.
+type FieldListMember interface {
+	fieldListMember()
+}
+
+// MemberRecord represents an LF_MEMBER field (data member).
+type MemberRecord struct {
+	Access     MemberAccess
+	Type       TypeIndex
+	Offset     uint64
+	Name       string
+}
+
+func (*MemberRecord) fieldListMember() {}
+
+// StaticMemberRecord represents an LF_STMEMBER field (static data member).
+type StaticMemberRecord struct {
+	Access MemberAccess
+	Type   TypeIndex
+	Name   string
+}
+
+func (*StaticMemberRecord) fieldListMember() {}
+
+// MethodRecord represents an LF_METHOD field (overloaded method group).
+type MethodRecord struct {
+	Count      uint16
+	MethodList TypeIndex
+	Name       string
+}
+
+func (*MethodRecord) fieldListMember() {}
+
+// OneMethodRecord represents an LF_ONEMETHOD field (single method).
+type OneMethodRecord struct {
+	Attributes   MethodProperties
+	Type         TypeIndex
+	VBaseOffset  int32 // Only for intro virtual methods
+	Name         string
+}
+
+func (*OneMethodRecord) fieldListMember() {}
+
+// NestedTypeRecord represents an LF_NESTTYPE field (nested type).
+type NestedTypeRecord struct {
+	Type TypeIndex
+	Name string
+}
+
+func (*NestedTypeRecord) fieldListMember() {}
+
+// BaseClassRecord represents an LF_BCLASS field (base class).
+type BaseClassRecord struct {
+	Access MemberAccess
+	Type   TypeIndex
+	Offset uint64
+}
+
+func (*BaseClassRecord) fieldListMember() {}
+
+// VirtualBaseClassRecord represents an LF_VBCLASS or LF_IVBCLASS field.
+type VirtualBaseClassRecord struct {
+	Access            MemberAccess
+	BaseType          TypeIndex
+	VBPtrType         TypeIndex
+	VBPtrOffset       uint64
+	VBTableIndex      uint64
+}
+
+func (*VirtualBaseClassRecord) fieldListMember() {}
+
+// EnumerateRecord represents an LF_ENUMERATE field (enum value).
+type EnumerateRecord struct {
+	Access MemberAccess
+	Value  uint64
+	Name   string
+}
+
+func (*EnumerateRecord) fieldListMember() {}
+
+// VFuncTabRecord represents an LF_VFUNCTAB field (virtual function table pointer).
+type VFuncTabRecord struct {
+	Type TypeIndex
+}
+
+func (*VFuncTabRecord) fieldListMember() {}
+
+// ParseFieldListRecord parses an LF_FIELDLIST record.
+func ParseFieldListRecord(data []byte) (*FieldListRecord, error) {
+	r := stream.NewReader(data)
+	rec := &FieldListRecord{
+		Members: make([]FieldListMember, 0),
+	}
+
+	for r.Remaining() > 0 {
+		// Skip padding bytes
+		for r.Remaining() > 0 {
+			b, err := r.PeekU8()
+			if err != nil {
+				break
+			}
+			if b < 0xF0 {
+				break
+			}
+			r.ReadU8() // consume padding
+		}
+
+		if r.Remaining() < 2 {
+			break
+		}
+
+		kind, err := r.ReadU16()
+		if err != nil {
+			break
+		}
+
+		member, err := parseFieldListMember(TypeRecordKind(kind), r)
+		if err != nil {
+			// Skip unknown member types instead of failing
+			continue
+		}
+		if member != nil {
+			rec.Members = append(rec.Members, member)
+		}
+	}
+
+	return rec, nil
+}
+
+func parseFieldListMember(kind TypeRecordKind, r *stream.Reader) (FieldListMember, error) {
+	switch kind {
+	case LF_MEMBER:
+		return parseMemberField(r)
+	case LF_STMEMBER:
+		return parseStaticMemberField(r)
+	case LF_METHOD:
+		return parseMethodField(r)
+	case LF_ONEMETHOD:
+		return parseOneMethodField(r)
+	case LF_NESTTYPE:
+		return parseNestedTypeField(r)
+	case LF_BCLASS:
+		return parseBaseClassField(r)
+	case LF_VBCLASS, LF_IVBCLASS:
+		return parseVirtualBaseClassField(r)
+	case LF_ENUMERATE:
+		return parseEnumerateField(r)
+	case LF_VFUNCTAB:
+		return parseVFuncTabField(r)
+	case LF_INDEX:
+		// Continuation index - skip for now
+		r.ReadU32() // type index
+		return nil, nil
+	default:
+		return nil, nil
+	}
+}
+
+func parseMemberField(r *stream.Reader) (*MemberRecord, error) {
+	attrs, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	typ, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	offset, err := r.ReadNumeric()
+	if err != nil {
+		return nil, err
+	}
+
+	name, err := r.ReadCString()
+	if err != nil {
+		return nil, err
+	}
+
+	return &MemberRecord{
+		Access: MemberAccess(attrs & 0x03),
+		Type:   TypeIndex(typ),
+		Offset: offset,
+		Name:   name,
+	}, nil
+}
+
+func parseStaticMemberField(r *stream.Reader) (*StaticMemberRecord, error) {
+	attrs, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	typ, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	name, err := r.ReadCString()
+	if err != nil {
+		return nil, err
+	}
+
+	return &StaticMemberRecord{
+		Access: MemberAccess(attrs & 0x03),
+		Type:   TypeIndex(typ),
+		Name:   name,
+	}, nil
+}
+
+func parseMethodField(r *stream.Reader) (*MethodRecord, error) {
+	count, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	methodList, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	name, err := r.ReadCString()
+	if err != nil {
+		return nil, err
+	}
+
+	return &MethodRecord{
+		Count:      count,
+		MethodList: TypeIndex(methodList),
+		Name:       name,
+	}, nil
+}
+
+func parseOneMethodField(r *stream.Reader) (*OneMethodRecord, error) {
+	attrs, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	typ, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	rec := &OneMethodRecord{
+		Attributes: MethodProperties(attrs),
+		Type:       TypeIndex(typ),
+	}
+
+	// VBaseOffset is present for intro virtual methods
+	mprop := (attrs >> 2) & 0x07
+	if mprop == uint16(MethodKindIntroVirtual) || mprop == uint16(MethodKindPureIntro) {
+		vbaseOffset, err := r.ReadI32()
+		if err != nil {
+			return nil, err
+		}
+		rec.VBaseOffset = vbaseOffset
+	}
+
+	name, err := r.ReadCString()
+	if err != nil {
+		return nil, err
+	}
+	rec.Name = name
+
+	return rec, nil
+}
+
+func parseNestedTypeField(r *stream.Reader) (*NestedTypeRecord, error) {
+	// Padding
+	_, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	typ, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	name, err := r.ReadCString()
+	if err != nil {
+		return nil, err
+	}
+
+	return &NestedTypeRecord{
+		Type: TypeIndex(typ),
+		Name: name,
+	}, nil
+}
+
+func parseBaseClassField(r *stream.Reader) (*BaseClassRecord, error) {
+	attrs, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	typ, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	offset, err := r.ReadNumeric()
+	if err != nil {
+		return nil, err
+	}
+
+	return &BaseClassRecord{
+		Access: MemberAccess(attrs & 0x03),
+		Type:   TypeIndex(typ),
+		Offset: offset,
+	}, nil
+}
+
+func parseVirtualBaseClassField(r *stream.Reader) (*VirtualBaseClassRecord, error) {
+	attrs, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	baseType, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	vbptrType, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	vbptrOffset, err := r.ReadNumeric()
+	if err != nil {
+		return nil, err
+	}
+
+	vbtableIndex, err := r.ReadNumeric()
+	if err != nil {
+		return nil, err
+	}
+
+	return &VirtualBaseClassRecord{
+		Access:       MemberAccess(attrs & 0x03),
+		BaseType:     TypeIndex(baseType),
+		VBPtrType:    TypeIndex(vbptrType),
+		VBPtrOffset:  vbptrOffset,
+		VBTableIndex: vbtableIndex,
+	}, nil
+}
+
+func parseEnumerateField(r *stream.Reader) (*EnumerateRecord, error) {
+	attrs, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	value, err := r.ReadNumeric()
+	if err != nil {
+		return nil, err
+	}
+
+	name, err := r.ReadCString()
+	if err != nil {
+		return nil, err
+	}
+
+	return &EnumerateRecord{
+		Access: MemberAccess(attrs & 0x03),
+		Value:  value,
+		Name:   name,
+	}, nil
+}
+
+func parseVFuncTabField(r *stream.Reader) (*VFuncTabRecord, error) {
+	// Padding
+	_, err := r.ReadU16()
+	if err != nil {
+		return nil, err
+	}
+
+	typ, err := r.ReadU32()
+	if err != nil {
+		return nil, err
+	}
+
+	return &VFuncTabRecord{
+		Type: TypeIndex(typ),
+	}, nil
+}
