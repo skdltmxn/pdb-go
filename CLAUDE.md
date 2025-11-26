@@ -66,6 +66,21 @@ cmd/pdbview/ - CLI tool (cobra-based)
 - **Streaming Iterators**: `Public()` streams symbols on-demand using Go 1.23 `iter.Seq`
 - **Memory Efficiency**: Symbol data kept as raw bytes; parsed on-demand
 - **Thread Safety**: `File` is safe for concurrent reads after opening
+- **Inheritance-aware Member Search**: `FindMembers("Child::member")` traverses base classes via BFS
+
+### Symbol vs Member (Important Distinction)
+
+These are fundamentally different concepts in PDB:
+
+| Aspect | Symbol | Member |
+|--------|--------|--------|
+| Source | Symbol Records (S_GPROC32, S_GDATA32, etc.) | Type Records (LF_MEMBER, LF_STMEMBER) |
+| Purpose | Linker-visible names with runtime addresses | Type definition components (fields) |
+| Address | Section:Offset (runtime address) | Byte offset within class/struct |
+| Location | `pdb/symbol.go`, `pdb/module.go` | `pdb/type.go` |
+| Examples | `main`, `MyClass::Method` (as code) | `MyClass::m_field` (as data member) |
+
+Do NOT merge these concepts - they map to different PDB streams.
 
 ### Symbol Stream vs Hash Table
 
